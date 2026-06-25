@@ -1,0 +1,18 @@
+# Redrob Intelligent Candidate Ranking System
+# Dependencies for production ranking pipeline
+
+# Core
+pandas==2.0.3
+numpy==1.24.3
+
+# Semantic embedding (lightweight)
+sentence-transformers==2.2.2
+
+# Document processing (for reading JD if .docx)
+python-docx==0.8.11
+
+# Optional: For offline models
+torch==2.0.1+cpu
+
+# Development/validation
+pytest==7.4.0
