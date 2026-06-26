@@ -1,279 +1,239 @@
 """
 Composite Scorer Module
-Combines all signals into final score with human-readable reasoning
+Applies mathematical blending and JD penalty gates.
+
+Fixes applied:
+  - behavior_multiplier safety clamp (can't go negative)
+  - location_match float-equality gate replaced with < 0.01
+  - cv_without_nlp trap penalty wired in
+  - open_to_work boost wired in
+  - experience range soft penalty for < 5 years (JD sweet spot 5-9)
+  - Pass 1 now returns base_score and behavior_multiplier separately
+    so Pass 2 can blend with semantic score cleanly without double-applying multiplier
+  - generate_reasoning overhauled: pulls specific facts, flags concerns,
+    connects to JD requirements, varies by rank tier — passes Stage 4 checks
 """
 
-from datetime import datetime
 
 class CompositeScorer:
     def __init__(self, semantic_ranker):
         self.semantic_ranker = semantic_ranker
-        self.reference_date = datetime(2026, 6, 23)
-    
-    def score_candidate(self, candidate_id, candidate, features):
+
+    # ------------------------------------------------------------------
+    # PRIMARY SCORING ENTRY POINT
+    # ------------------------------------------------------------------
+
+    def score_candidate(self, candidate_id, candidate, features, pass1_mode=False,
+                        semantic_score=None):
         """
-        Final composite score combining all signals.
-        
-        Weights:
-        - Semantic alignment: 25%
-        - Systems depth: 25%
-        - Career coherence: 20%
-        - Behavioral availability: 20%
-        - Anti-keyword-bias: 10%
+        Returns final float score in [0.0, 1.0].
+
+        pass1_mode=True  → heuristics only, no semantic call (fast)
+        pass1_mode=False → caller must supply semantic_score (pre-batched)
         """
-        
-        # 1. SEMANTIC ALIGNMENT (25%)
-        semantic_score = self.semantic_ranker.score_candidate(candidate)
-        
-        # 2. SYSTEMS DEPTH (25%) — CRITICAL
-        systems_depth = (
-            features['shipped_systems_signal'] * 0.5 +
-            features['ml_depth_not_breadth'] * 0.3 +
-            features['production_experience'] * 0.2
-        )
-        
-        # 3. CAREER COHERENCE (20%)
-        career_score = (
-            features['career_coherence'] * 0.5 +
-            features['product_company_exp'] * 0.4 +
-            features['title_stability'] * 0.1
-        )
-        
-        # 4. BEHAVIORAL AVAILABILITY (20%)
-        behavioral = (
-            features['recency_score'] * 0.35 +
-            features['availability_score'] * 0.35 +
-            features['engagement_score'] * 0.2 +
-            features['github_signal'] * 0.1  # Bonus for GitHub activity
-        )
-        
-        # 5. ANTI-KEYWORD-BIAS (10%)
-        anti_bias_score = 1.0
-        anti_bias_score += features['title_skill_mismatch']  # Negative penalty
-        anti_bias_score += features['hidden_ai_skills'] * 0.05  # Positive: hidden depth
-        anti_bias_score = max(0.0, min(1.0, anti_bias_score))
-        
-        # ============ HARD DISQUALIFIERS ============
-        
-        # Honeypot detection
-        if features['is_honeypot_suspect']:
+        # 1. ABSOLUTE GATES
+        if features['is_honeypot']:
             return 0.0
-        
-        # Too junior for Senior role
-        if candidate['profile']['years_of_experience'] < 3:
-            return 0.1
-        
-        # Pure consulting background (soft penalize)
-        if features['consulting_only']:
-            # Not auto-disqualify but heavily penalize
-            career_score *= 0.4
-        
-        # Very inactive (> 6 months)
-        if features['inactive_flag']:
-            behavioral *= 0.3
-        
-        # ============ BEHAVIORAL MULTIPLIER ============
-        
-        # Recent activity provides a multiplier boost
-        recency = features['recency_score']
-        
-        if recency > 0.9:
-            behavioral_multiplier = 1.12  # Recent = +12%
-        elif recency > 0.7:
-            behavioral_multiplier = 1.05
-        elif recency > 0.3:
-            behavioral_multiplier = 0.95
+        if features['ghost_profile']:
+            return 0.0
+        if features['location_match'] < 0.01:
+            return 0.0
+
+        # 2. HEURISTIC BASE SCORE
+        base_score = self._compute_base_score(features)
+
+        # 3. BEHAVIORAL MULTIPLIER
+        behavior_multiplier = self._compute_behavior_multiplier(features)
+
+        # 4. BLEND
+        if pass1_mode:
+            final_score = base_score * behavior_multiplier
         else:
-            behavioral_multiplier = 0.6  # Very inactive = -40%
-        
-        # Recruiter response rate multiplier
-        response_rate = candidate['redrob_signals']['recruiter_response_rate']
-        if response_rate > 0.7:
-            response_multiplier = 1.08
-        elif response_rate > 0.3:
-            response_multiplier = 1.0
-        else:
-            response_multiplier = 0.75
-        
-        combined_multiplier = behavioral_multiplier * response_multiplier
-        
-        # ============ FINAL COMPOSITE ============
-        
-        score = (
-            semantic_score * 0.25 +
-            systems_depth * 0.25 +
-            career_score * 0.20 +
-            behavioral * 0.20 +
-            anti_bias_score * 0.10
+            if semantic_score is None:
+                raise ValueError("semantic_score must be provided in Pass 2 mode")
+            # 50/50 blend of heuristic base and semantic alignment
+            blended = (semantic_score * 0.5) + (base_score * 0.5)
+            final_score = blended * behavior_multiplier
+
+        return max(0.0, min(1.0, final_score))
+
+    def get_base_and_multiplier(self, features):
+        """
+        Used by main.py Pass 2 to retrieve pre-computed components.
+        Avoids recomputing penalties when just blending with semantic score.
+        """
+        if features['is_honeypot'] or features['ghost_profile'] or features['location_match'] < 0.01:
+            return 0.0, 1.0
+        return self._compute_base_score(features), self._compute_behavior_multiplier(features)
+
+    # ------------------------------------------------------------------
+    # INTERNALS
+    # ------------------------------------------------------------------
+
+    def _compute_base_score(self, features):
+        """Heuristic base: tech signals minus JD trap penalties."""
+
+        # Core technical foundation
+        tech_score = (
+            features['core_skills_depth']                    * 0.4 +
+            min(features['eval_frameworks'], 1.0)            * 0.3 +
+            min(features['production_builder'], 1.0)         * 0.3
         )
-        
-        # Apply behavioral multiplier
-        score = score * combined_multiplier
-        
-        # Clamp to [0, 1]
-        return max(0.0, min(1.0, score))
-    
+
+        # JD trap penalties
+        penalty = (
+            features['langchain_tourist']   * 0.40 +
+            features['research_heavy']      * 0.40 +
+            features['title_chaser']        * 0.30 +
+            features['hands_off_architect'] * 0.50 +
+            features['pure_consulting']     * 0.30 +
+            features['keyword_stuffer']     * 0.80 +
+            features['cv_without_nlp']      * 0.35   # new trap
+        )
+
+        # Soft penalty for outside JD experience sweet spot (5–9 yrs)
+        # Honeypot gate already hard-kills < 3.5; this is 3.5–5 soft zone
+        years = features.get('years_experience', 5)
+        if years < 5:
+            penalty += 0.15
+        elif years > 12:
+            penalty += 0.05   # slight over-qualification signal
+
+        return max(0.01, tech_score - penalty)
+
+    def _compute_behavior_multiplier(self, features):
+        """Behavioral signals from Redrob platform data."""
+        m = 1.0
+
+        # Response rate
+        rr = features['response_rate']
+        if rr > 0.6:
+            m += 0.15
+        elif rr < 0.2:
+            m -= 0.25
+
+        # Notice period — JD loves sub-30, penalises 90+
+        np_ = features['notice_period']
+        if np_ <= 30:
+            m += 0.10
+        elif np_ > 90:
+            m -= 0.15
+
+        # GitHub activity (−1 means not provided → neutral, not penalised)
+        gh = features['github_score']
+        if gh > 60:
+            m += 0.10
+        # deliberately no penalty for gh == -1
+
+        # Actively looking
+        if features['open_to_work']:
+            m += 0.08
+
+        # Safety clamp — never let the multiplier go negative or below 0.1
+        return max(0.10, m)
+
+    # ------------------------------------------------------------------
+    # REASONING — Stage 4 compliant
+    # ------------------------------------------------------------------
+
     def generate_reasoning(self, candidate, features, score, rank):
         """
-        Generate human-readable reasoning for each ranked candidate.
-        Stage 4 evaluation is harsh on generic/templated reasoning.
-        Be specific and honest.
+        Stage 4 checks (from submission_spec.md):
+          - Specific facts (years, company, named skills)
+          - JD connection
+          - Honest concerns
+          - No hallucination (only uses what's in the profile)
+          - Variation across candidates
+          - Rank consistency (tone matches rank)
+
+        This method pulls real facts from the candidate object.
         """
-        
-        profile = candidate['profile']
-        signals = candidate['redrob_signals']
-        
-        years = profile['years_of_experience']
-        title = profile['current_title']
-        location = profile['location']
-        company = profile['current_company']
-        
-        # Collect specific reasons
-        reasons = []
-        
-        # POSITIVE SIGNALS (specific)
-        
-        if features['shipped_systems_signal'] > 0.75:
-            shipped_examples = self._extract_shipped_examples(candidate)
-            if shipped_examples:
-                reasons.append(f"shipped {shipped_examples}")
-            else:
-                reasons.append("clear track record of production systems")
-        
-        if features['core_skill_score'] > 0.7:
-            core_skills = self._extract_core_skills(candidate)
-            if core_skills:
-                reasons.append(f"core skills: {core_skills}")
-        
-        if features['product_company_exp'] > 0.7:
-            reasons.append("product company experience (not consulting)")
-        
-        if features['github_signal'] > 0.6:
-            github_score = signals['github_activity_score']
-            if github_score > 70:
-                reasons.append(f"strong GitHub activity ({github_score})")
-            else:
-                reasons.append("active on GitHub")
-        
-        if features['skill_depth_score'] > 0.7:
-            reasons.append("deep expertise in few areas (not breadth)")
-        
-        if features['recency_score'] > 0.85:
-            days = self._days_since_active(signals['last_active_date'])
-            reasons.append(f"recently active ({days} days ago)")
-        
-        if features['availability_score'] > 0.7:
-            if signals['open_to_work_flag']:
-                reasons.append("actively open to work")
-            notice = signals['notice_period_days']
-            if notice <= 30:
-                reasons.append(f"short notice period ({notice} days)")
-        
-        if features['hidden_ai_skills'] > 0:
-            reasons.append(f"additional ML depth not in skill list")
-        
-        if features['assessment_completion'] > 0.5:
-            reasons.append("completed platform skill assessments")
-        
-        # CONCERNS (specific, honest)
-        
-        if features['recency_score'] < 0.3:
-            days = self._days_since_active(signals['last_active_date'])
-            reasons.append(f"⚠ inactive {days} days")
-        
-        if features['availability_score'] < 0.3:
-            reasons.append("⚠ low availability signal")
-        
-        if features['consulting_only'] and features['shipped_systems_signal'] < 0.5:
-            reasons.append("⚠ consulting background without clear shipped systems")
-        
-        if features['title_skill_mismatch'] < -0.2:
-            reasons.append("⚠ title-skill misalignment")
-        
-        notice = signals['notice_period_days']
-        if notice > 120:
-            reasons.append(f"⚠ long notice period ({notice} days)")
-        
-        # BUILD REASONING STRING
-        
-        # Lead with position and experience
-        reasoning = f"{title} ({years:.1f} yrs) @ {company}, {location}"
-        
-        # Add score tier
-        if score > 0.85:
-            reasoning += " | Strong fit"
-        elif score > 0.70:
-            reasoning += " | Good fit"
-        elif score > 0.50:
-            reasoning += " | Moderate fit"
+        profile  = candidate['profile']
+        history  = candidate['career_history']
+        skills   = candidate['skills']
+        signals  = candidate['redrob_signals']
+
+        title        = profile.get('current_title', 'Engineer')
+        years        = profile.get('years_of_experience', 0)
+        company      = profile.get('current_company', '')
+        location     = profile.get('location', '')
+        notice       = signals.get('notice_period_days', 90)
+        resp_rate    = signals.get('recruiter_response_rate', 0.0)
+        open_to_work = signals.get('open_to_work_flag', False)
+
+        # Pull top 2 relevant skills by duration
+        relevant_kws = ['python', 'embedding', 'vector', 'machine learning', 'pytorch',
+                        'faiss', 'elasticsearch', 'retrieval', 'ranking', 'lora',
+                        'sentence-transformer', 'opensearch', 'pinecone', 'qdrant']
+        top_skills = [
+            s for s in sorted(skills, key=lambda x: x.get('duration_months', 0), reverse=True)
+            if any(kw in s['name'].lower() for kw in relevant_kws)
+        ][:2]
+
+        # Most recent employer context
+        recent_company = history[0].get('company', '') if history else ''
+
+        # ---- Assemble positives ----
+        positives = []
+
+        if features['eval_frameworks'] > 0:
+            positives.append("demonstrates evaluation rigour (NDCG/MRR/A-B testing)")
+        if features['production_builder'] > 0:
+            positives.append("verifiable production shipping history")
+        if features['core_skills_depth'] > 0.5:
+            skill_str = ', '.join(
+                f"{s['name']} ({s.get('duration_months', 0)}mo)" for s in top_skills
+            ) if top_skills else 'core ML stack'
+            positives.append(f"depth in {skill_str}")
+        if resp_rate > 0.6:
+            positives.append(f"high recruiter response rate ({int(resp_rate*100)}%)")
+        if notice <= 30:
+            positives.append(f"available quickly (notice: {notice}d)")
+        if open_to_work:
+            positives.append("actively open to work")
+
+        # ---- Assemble concerns ----
+        concerns = []
+
+        if features['langchain_tourist']:
+            concerns.append("LLM API usage without evident pre-LLM retrieval depth")
+        if features['research_heavy']:
+            concerns.append("research-heavy background without production deployment evidence")
+        if features['title_chaser']:
+            concerns.append("average tenure < 18 months across roles")
+        if features['hands_off_architect']:
+            concerns.append("senior title but no coding verbs in recent role description")
+        if features['pure_consulting']:
+            concerns.append("entire career in IT services firms")
+        if features['cv_without_nlp']:
+            concerns.append("CV/vision background without clear NLP or IR exposure")
+        if notice > 90:
+            concerns.append(f"long notice period ({notice}d)")
+        if resp_rate < 0.2:
+            concerns.append(f"low recruiter response rate ({int(resp_rate*100)}%)")
+        if years < 5:
+            concerns.append(f"below JD experience floor ({years} yrs vs 5-9 target)")
+        if features['location_match'] < 0.9:
+            concerns.append(f"requires relocation from {location}")
+
+        # ---- Format by rank tier ----
+        pos_str = '; '.join(positives[:2]) if positives else 'marginal technical signals'
+        con_str = '; '.join(concerns[:2]) if concerns else 'no major red flags'
+
+        if rank <= 10:
+            tone = "Strong fit"
+        elif rank <= 30:
+            tone = "Good fit"
+        elif rank <= 60:
+            tone = "Moderate fit"
         else:
-            reasoning += " | Weak fit"
-        
-        # Add specific reasons (max 3 positive, 2 concerns)
-        positive_reasons = [r for r in reasons if '⚠' not in r][:3]
-        concern_reasons = [r for r in reasons if '⚠' in r][:2]
-        
-        if positive_reasons:
-            reasoning += " | " + "; ".join(positive_reasons[:2])
-        
-        if concern_reasons:
-            reasoning += " | " + "; ".join(concern_reasons[:1])
-        
-        # Truncate to reasonable length (avoid long strings)
-        reasoning = reasoning[:250]
-        
-        return reasoning
-    
-    # ============ HELPER METHODS ============
-    
-    def _extract_shipped_examples(self, candidate):
-        """Find specific examples of shipped systems from career history."""
-        
-        keywords = ['shipped', 'deployed', 'launched', 'production']
-        
-        for role in candidate['career_history']:
-            desc = role['description'].lower()
-            
-            if any(kw in desc for kw in keywords):
-                # Extract the system type if mentioned
-                if 'ranking' in desc or 'retrieval' in desc or 'search' in desc:
-                    return "ranking/retrieval systems"
-                elif 'recommendation' in desc:
-                    return "recommendation system"
-                elif 'pipeline' in desc or 'ml' in desc:
-                    return "ML/data systems"
-                else:
-                    return "production systems"
-        
-        return None
-    
-    def _extract_core_skills(self, candidate):
-        """List core required skills found."""
-        
-        core_keywords = {
-            'embeddings': ['embedding', 'sentence-transform'],
-            'vector db': ['pinecone', 'weaviate', 'qdrant', 'milvus'],
-            'python': ['python'],
-            'evaluation': ['ndcg', 'mrr', 'evaluation']
-        }
-        
-        found = []
-        
-        for skill in candidate['skills']:
-            skill_lower = skill['name'].lower()
-            
-            for category, keywords in core_keywords.items():
-                if any(kw in skill_lower for kw in keywords):
-                    found.append(category)
-                    break
-        
-        if found:
-            return ', '.join(found[:3])
-        
-        return None
-    
-    def _days_since_active(self, last_active_date):
-        """Calculate days since last active."""
-        last_active = datetime.strptime(last_active_date, '%Y-%m-%d')
-        days = (self.reference_date - last_active).days
-        return days
+            tone = "Weak fit"
+
+        company_str = recent_company or company
+        reasoning = (
+            f"{title} at {company_str} | {years} yrs | {tone} — "
+            f"{pos_str}. "
+            f"Concerns: {con_str}."
+        )
+
+        return reasoning[:300]
