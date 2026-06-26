@@ -42,29 +42,30 @@ class CompositeScorer:
         # 2. HEURISTIC BASE SCORE
         base_score = self._compute_base_score(features)
 
-        # 3. BEHAVIORAL MULTIPLIER
-        behavior_multiplier = self._compute_behavior_multiplier(features)
+        # 3. BEHAVIORAL BONUS (additive, normalised to [0,1])
+        behavior_bonus = self._compute_behavior_bonus(features)
 
         # 4. BLEND
+        # Weights: sem 0.45 + heuristic 0.45 + behavior 0.10 = 1.0 max
+        # Additive approach prevents score saturation that a multiplier causes
         if pass1_mode:
-            final_score = base_score * behavior_multiplier
+            # Pass 1: no semantic score yet — heuristics 0.90 + behavior 0.10
+            final_score = (base_score * 0.90) + (behavior_bonus * 0.10)
         else:
             if semantic_score is None:
                 raise ValueError("semantic_score must be provided in Pass 2 mode")
-            # 50/50 blend of heuristic base and semantic alignment
-            blended = (semantic_score * 0.5) + (base_score * 0.5)
-            final_score = blended * behavior_multiplier
+            final_score = (semantic_score * 0.45) + (base_score * 0.45) + (behavior_bonus * 0.10)
 
         return max(0.0, min(1.0, final_score))
 
-    def get_base_and_multiplier(self, features):
+    def get_base_and_bonus(self, features):
         """
-        Used by main.py Pass 2 to retrieve pre-computed components.
-        Avoids recomputing penalties when just blending with semantic score.
+        Used by rank.py Pass 2 to retrieve pre-computed components.
+        Returns (base_score, behavior_bonus) for clean additive blend with semantic score.
         """
         if features['is_honeypot'] or features['ghost_profile'] or features['location_match'] < 0.01:
-            return 0.0, 1.0
-        return self._compute_base_score(features), self._compute_behavior_multiplier(features)
+            return 0.0, 0.5  # 0.5 = neutral behavior bonus
+        return self._compute_base_score(features), self._compute_behavior_bonus(features)
 
     # ------------------------------------------------------------------
     # INTERNALS
@@ -101,36 +102,96 @@ class CompositeScorer:
 
         return max(0.01, tech_score - penalty)
 
-    def _compute_behavior_multiplier(self, features):
-        """Behavioral signals from Redrob platform data."""
-        m = 1.0
+    def _compute_behavior_bonus(self, features):
+        """
+        Behavioral signals normalised to [0.0, 1.0].
+        Used as an additive third component (weight 0.10) rather than a
+        multiplier — prevents score saturation at 1.0 for good candidates.
 
-        # Response rate
+        Scoring:
+          response_rate, notice_period, github, open_to_work, assessments
+          each contribute independently; total is clipped to [0.0, 1.0].
+        """
+        bonus = 0.5  # neutral baseline
+
+        # Response rate (0-1 signal, strong indicator of availability)
         rr = features['response_rate']
         if rr > 0.6:
-            m += 0.15
+            bonus += 0.20
+        elif rr > 0.3:
+            bonus += 0.05
         elif rr < 0.2:
-            m -= 0.25
+            bonus -= 0.20
 
-        # Notice period — JD loves sub-30, penalises 90+
+        # Notice period
         np_ = features['notice_period']
         if np_ <= 30:
-            m += 0.10
+            bonus += 0.15
+        elif np_ <= 60:
+            bonus += 0.05
         elif np_ > 90:
-            m -= 0.15
+            bonus -= 0.15
 
-        # GitHub activity (−1 means not provided → neutral, not penalised)
+        # GitHub activity (-1 = not provided → neutral)
         gh = features['github_score']
         if gh > 60:
-            m += 0.10
-        # deliberately no penalty for gh == -1
+            bonus += 0.10
 
-        # Actively looking
+        # Actively open to work
         if features['open_to_work']:
-            m += 0.08
+            bonus += 0.08
 
-        # Safety clamp — never let the multiplier go negative or below 0.1
-        return max(0.10, m)
+        # Skill assessment scores — one-time boost for proven platform competence
+        assessments = features.get('assessments', {})
+        relevant_kws = ['python', 'machine learning', 'sql', 'data', 'algorithm']
+        for skill, ascore in assessments.items():
+            if isinstance(ascore, (int, float)) and ascore > 80:
+                if any(kw in skill.lower() for kw in relevant_kws):
+                    bonus += 0.05
+                    break  # one-time only
+
+        # Interview completion rate — measures follow-through reliability
+        # Low rate = scheduled interviews but didn't show = serious availability concern
+        icr = features.get('interview_completion', 0.0)
+        if icr > 0.8:
+            bonus += 0.10
+        elif icr > 0.5:
+            bonus += 0.03
+        elif 0 < icr < 0.4:
+            bonus -= 0.15
+
+        # Avg response time — fast responder = more reachable
+        # 999 = not provided → neutral
+        art = features.get('avg_response_hours', 999)
+        if art < 24:
+            bonus += 0.07
+        elif art > 120:  # >5 days response time
+            bonus -= 0.08
+
+        # Profile completeness — incomplete profile = passive/not serious
+        pc = features.get('profile_completeness', 0.0)
+        if pc >= 80:
+            bonus += 0.05
+        elif pc < 40:
+            bonus -= 0.05
+
+        # Saved by recruiters — external market validation signal
+        sbr = features.get('saved_by_recruiters', 0)
+        if sbr >= 5:
+            bonus += 0.06
+        elif sbr >= 2:
+            bonus += 0.03
+
+        # Offer acceptance rate — -1 means no history (neutral)
+        # Low rate with history = serial time waster
+        oar = features.get('offer_acceptance')
+        if oar is not None and oar != -1:
+            if oar > 0.7:
+                bonus += 0.04
+            elif oar < 0.3:
+                bonus -= 0.06
+
+        return max(0.0, min(1.0, bonus))
 
     # ------------------------------------------------------------------
     # REASONING — Stage 4 compliant

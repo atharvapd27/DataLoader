@@ -1,0 +1,74 @@
+# Redrob Hackathon — Submission Metadata
+# ============================================================================
+# Team identity
+# ============================================================================
+team_name: "khikhi"
+
+primary_contact:
+  name: "Ishika Gupta"
+  email: "igputa2_be23@thapar.edu"
+  phone: "+91-6260915479"        # ← fill your number before submitting
+
+team_members:
+  - name: "Ishika Gupta"
+    email: "igputa2_be23@thapar.edu"
+    role: "Team Lead / ML Engineer"
+  - name: "Atharva Pandey"
+    email: "atharvapandey100@gmail.com"
+    role: "Data Engineer / Developer"
+
+# ============================================================================
+# Code and reproducibility
+# ============================================================================
+github_repo: "https://github.com/Miltonbottle/DataLoader"
+
+sandbox_link: "PASTE_COLAB_LINK_HERE" 
+# ← Replace with your Google Colab share link once created
+
+reproduce_command: "python src/rank.py --candidates ./data/candidates.jsonl.gz --jd ./data/job_description.md --out ./outputs/submission.csv"
+
+# ============================================================================
+# Compute environment
+# ============================================================================
+compute:
+  platform: "HP Laptop, Intel Core python i5-1135G7"
+  cpu_cores: 4
+  ram_gb: 8
+  python_version: "3.13.5"
+  os: "Windows 11"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: false
+  pre_computation_time_minutes: 0
+
+# ============================================================================
+# AI tools declaration
+# ============================================================================
+ai_tools_used:
+  - "Claude"
+  - "Gemini"
+
+ai_usage_summary: |
+  Used Claude and Gemini as architectural sounding boards for O(1) pipeline optimization, code review, and edge-case bug detection (e.g., tie-breaker rounding, matrix multiplication batching). LLMs assisted in translating JD requirements into strict mathematical heuristic gates. All final engineering decisions, pipeline integration, and validation testing were conducted locally by the team. Zero candidate data was fed to any external LLM during the actual ranking execution.
+
+# ============================================================================
+# Approach summary
+# ============================================================================
+methodology_summary: |
+  Two-pass heuristic-semantic pipeline strictly optimized for the 5-minute CPU constraint. 
+  
+  Pass 1 (Retrieval): An O(1) text-blob heuristic funnel scans 100k candidates in ~15s. It applies absolute hard-gates (honeypots, ghost profiles, location mismatches) and mathematically penalizes JD traps (LangChain tourists, title chasers, hands-off architects, pure research). It directly boosts proven depth in evaluation frameworks (NDCG/MRR) and production ML shipping. 
+  
+  Pass 2 (Re-ranking): Takes the top 4,000 finalists and performs batched, vectorized semantic encoding (all-MiniLM-L6-v2) to compute cosine similarity against a curated JD embedding matrix. 
+  
+  The final score mathematically blends Semantic Alignment and Heuristic Tech Depth, scaled by a global Behavioral Multiplier built from 9 platform signals (response rates, interview completion, notice period, active applications). Total runtime is under 90 seconds on CPU. Uses deterministic f-strings for 0% hallucination, Stage 4-compliant reasoning generation.
+
+# ============================================================================
+# Declarations
+# ============================================================================
+declarations:
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true

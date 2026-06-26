@@ -102,7 +102,7 @@ class SemanticRanker:
         texts      = [self._extract_candidate_text(candidates[cid]) for cid in cand_ids]
         embeddings = self.model.encode(
             texts,
-            batch_size=32,
+            batch_size=64,
             show_progress_bar=True,
             convert_to_tensor=False
         )  # shape: (N, D)

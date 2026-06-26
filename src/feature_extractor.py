@@ -111,10 +111,19 @@ class FeatureExtractor:
             'core_skills_depth': self._core_skill_depth(skills),
 
             # --- Behavioral signals ---
-            'response_rate':  signals.get('recruiter_response_rate', 0.0),
-            'notice_period':  signals.get('notice_period_days', 90),
-            'github_score':   signals.get('github_activity_score', -1),   # -1 = not provided
-            'open_to_work':   1 if signals.get('open_to_work_flag', False) else 0,
+            # Use `or default` not `.get(key, default)` — guards against null JSON values
+            # where the key exists but is set to None (e.g. "notice_period_days": null)
+            'response_rate':          signals.get('recruiter_response_rate') or 0.0,
+            'notice_period':          signals.get('notice_period_days') or 90,
+            'github_score':           signals.get('github_activity_score') or -1,  # -1 = not provided
+            'open_to_work':           1 if signals.get('open_to_work_flag', False) else 0,
+            'assessments':            signals.get('skill_assessment_scores') or {},
+            # Newly added signals from schema
+            'interview_completion':   signals.get('interview_completion_rate') or 0.0,
+            'avg_response_hours':     signals.get('avg_response_time_hours') or 999,
+            'profile_completeness':   signals.get('profile_completeness_score') or 0.0,
+            'saved_by_recruiters':    signals.get('saved_by_recruiters_30d') or 0,
+            'offer_acceptance':       signals.get('offer_acceptance_rate'),  # None-safe: -1 is valid
 
             # --- Experience (used in scorer for soft range check) ---
             'years_experience': profile.get('years_of_experience', 0),
@@ -157,7 +166,10 @@ class FeatureExtractor:
         if not last_active_str:
             return True
 
-        last_active  = datetime.strptime(last_active_str, '%Y-%m-%d')
+        try:
+            last_active = datetime.strptime(last_active_str, '%Y-%m-%d')
+        except ValueError:
+            return True  # malformed date → treat as ghost
         days_inactive = (self.reference_date - last_active).days
         response_rate = signals.get('recruiter_response_rate', 0.0)
 

@@ -31,9 +31,11 @@ from composite_scorer import CompositeScorer
 # ---------------------------------------------------------------------------
 
 def load_candidates(jsonl_path):
+    import gzip
     candidates = {}
     print(f"Loading candidates from {jsonl_path}...")
-    with open(jsonl_path, 'r') as f:
+    opener = gzip.open if jsonl_path.endswith('.gz') else open
+    with opener(jsonl_path, 'rt') as f:
         for i, line in enumerate(f):
             line = line.strip()
             if not line:
@@ -97,15 +99,15 @@ def score_all_candidates(candidates, jd_text):
                 continue  # skip zeroed candidates early
 
             # Store components separately for clean Pass 2 blend
-            base_score, behavior_mult = composite_scorer.get_base_and_multiplier(features)
+            base_score, behavior_bonus = composite_scorer.get_base_and_bonus(features)
 
             pass1_results.append({
-                'candidate_id':     cand_id,
-                'pass1_score':      pass1_score,
-                'base_score':       base_score,
-                'behavior_mult':    behavior_mult,
-                'features':         features,
-                'candidate':        cand,
+                'candidate_id':   cand_id,
+                'pass1_score':    pass1_score,
+                'base_score':     base_score,
+                'behavior_bonus': behavior_bonus,
+                'features':       features,
+                'candidate':      cand,
             })
 
         except Exception as e:
@@ -118,7 +120,7 @@ def score_all_candidates(candidates, jd_text):
 
     # Sort and take top 5,000 for semantic re-ranking
     pass1_results.sort(key=lambda x: -x['pass1_score'])
-    top_5000 = pass1_results[:5000]
+    top_5000 = pass1_results[:3000]
     print(f"  Funnel output: top {len(top_5000):,} candidates → Pass 2")
 
     # -----------------------------------------------------------------------
@@ -132,12 +134,13 @@ def score_all_candidates(candidates, jd_text):
 
     final_results = []
     for result, sem_score in zip(top_5000, semantic_scores):
-        base_score   = result['base_score']
-        behavior_mult = result['behavior_mult']
+        base_score     = result['base_score']
+        behavior_bonus = result['behavior_bonus']
 
-        # 50/50 blend of semantic alignment and heuristic base
-        blended     = (sem_score * 0.5) + (base_score * 0.5)
-        final_score = max(0.0, min(1.0, blended * behavior_mult))
+        # Additive blend: sem 0.45 + heuristic 0.45 + behavior 0.10
+        # Max possible = 1.0 exactly — no saturation, full score spread
+        final_score = (sem_score * 0.45) + (base_score * 0.45) + (behavior_bonus * 0.10)
+        final_score = max(0.0, min(1.0, final_score))
 
         # Round to 6dp — matches validator tie-break logic
         result['score'] = round(final_score, 6)
