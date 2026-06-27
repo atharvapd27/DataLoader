@@ -53,7 +53,11 @@ class CompositeScorer:
             final_score = (base_score * 0.90) + (behavior_bonus * 0.10)
         else:
             if semantic_score is None:
-                raise ValueError("semantic_score must be provided in Pass 2 mode")
+                # Try live scoring if ranker available, else raise
+                if self.semantic_ranker is not None:
+                    semantic_score = self.semantic_ranker.score_candidate(candidate)
+                else:
+                    raise ValueError("semantic_score must be provided when no semantic_ranker is set")
             final_score = (semantic_score * 0.45) + (base_score * 0.45) + (behavior_bonus * 0.10)
 
         return max(0.0, min(1.0, final_score))
@@ -198,103 +202,135 @@ class CompositeScorer:
     # ------------------------------------------------------------------
 
     def generate_reasoning(self, candidate, features, score, rank):
-        """
-        Stage 4 checks (from submission_spec.md):
-          - Specific facts (years, company, named skills)
-          - JD connection
-          - Honest concerns
-          - No hallucination (only uses what's in the profile)
-          - Variation across candidates
-          - Rank consistency (tone matches rank)
-
-        This method pulls real facts from the candidate object.
-        """
+        """Stage 4 compliant: specific facts per candidate, varied, honest concerns."""
         profile  = candidate['profile']
         history  = candidate['career_history']
         skills   = candidate['skills']
         signals  = candidate['redrob_signals']
 
-        title        = profile.get('current_title', 'Engineer')
-        years        = profile.get('years_of_experience', 0)
-        company      = profile.get('current_company', '')
-        location     = profile.get('location', '')
-        notice       = signals.get('notice_period_days', 90)
-        resp_rate    = signals.get('recruiter_response_rate', 0.0)
-        open_to_work = signals.get('open_to_work_flag', False)
+        title          = profile.get('current_title', 'Engineer')
+        years          = profile.get('years_of_experience', 0)
+        company        = profile.get('current_company', '')
+        location       = profile.get('location', '')
+        notice         = signals.get('notice_period_days') or 90
+        resp_rate      = signals.get('recruiter_response_rate') or 0.0
+        open_to_work   = signals.get('open_to_work_flag', False)
+        github         = signals.get('github_activity_score') or -1
+        icr            = signals.get('interview_completion_rate') or 0.0
+        saved          = signals.get('saved_by_recruiters_30d') or 0
+        recent_company = history[0].get('company', '') if history else company
 
-        # Pull top 2 relevant skills by duration
+        # Top relevant skills by duration — unique per candidate
         relevant_kws = ['python', 'embedding', 'vector', 'machine learning', 'pytorch',
-                        'faiss', 'elasticsearch', 'retrieval', 'ranking', 'lora',
-                        'sentence-transformer', 'opensearch', 'pinecone', 'qdrant']
+                        'tensorflow', 'faiss', 'elasticsearch', 'retrieval', 'ranking',
+                        'lora', 'qlora', 'sentence-transformer', 'opensearch', 'pinecone',
+                        'qdrant', 'weaviate', 'milvus', 'nlp', 'transformers', 'bert',
+                        'fine-tuning', 'search', 'recommendation', 'reranking']
         top_skills = [
             s for s in sorted(skills, key=lambda x: x.get('duration_months', 0), reverse=True)
             if any(kw in s['name'].lower() for kw in relevant_kws)
         ][:2]
 
-        # Most recent employer context
-        recent_company = history[0].get('company', '') if history else ''
+        # First sentence of most recent role — truncate at word boundary
+        recent_desc = ''
+        if history:
+            desc = history[0].get('description', '')
+            if desc:
+                first_sent = desc.split('.')[0]
+                recent_desc = first_sent[:100] if len(first_sent) <= 100 else first_sent[:100].rsplit(' ', 1)[0]
 
-        # ---- Assemble positives ----
+        # Positives — most specific first
         positives = []
-
-        if features['eval_frameworks'] > 0:
-            positives.append("demonstrates evaluation rigour (NDCG/MRR/A-B testing)")
-        if features['production_builder'] > 0:
-            positives.append("verifiable production shipping history")
-        if features['core_skills_depth'] > 0.5:
+        if top_skills:
             skill_str = ', '.join(
-                f"{s['name']} ({s.get('duration_months', 0)}mo)" for s in top_skills
-            ) if top_skills else 'core ML stack'
-            positives.append(f"depth in {skill_str}")
+                f"{s['name']} ({s.get('duration_months',0)}mo {s.get('proficiency','')})"
+                for s in top_skills
+            )
+            positives.append(f"verified depth: {skill_str}")
+        if features['eval_frameworks'] > 0:
+            positives.append("knows NDCG/MRR/A-B eval")
+        if features['production_builder'] > 0 and recent_desc:
+            positives.append(f"production builder — {recent_desc}")
+        elif features['production_builder'] > 0:
+            positives.append("production shipping history")
         if resp_rate > 0.6:
-            positives.append(f"high recruiter response rate ({int(resp_rate*100)}%)")
+            positives.append(f"responsive ({int(resp_rate*100)}%)")
         if notice <= 30:
-            positives.append(f"available quickly (notice: {notice}d)")
+            positives.append(f"notice: {notice}d")
+        if github > 60:
+            positives.append(f"GitHub score {github}")
+        if saved >= 5:
+            positives.append(f"saved by {saved} recruiters")
+        if icr > 0.8:
+            positives.append(f"interview completion {int(icr*100)}%")
         if open_to_work:
             positives.append("actively open to work")
+        if 5 <= years <= 9:
+            positives.append(f"ideal experience range ({years} yrs)")
 
-        # ---- Assemble concerns ----
+        # Concerns
         concerns = []
-
         if features['langchain_tourist']:
-            concerns.append("LLM API usage without evident pre-LLM retrieval depth")
+            concerns.append("LLM API usage without pre-LLM ML depth")
         if features['research_heavy']:
-            concerns.append("research-heavy background without production deployment evidence")
+            concerns.append("research-heavy, no production deployment")
         if features['title_chaser']:
-            concerns.append("average tenure < 18 months across roles")
+            concerns.append("avg tenure < 18 months")
         if features['hands_off_architect']:
-            concerns.append("senior title but no coding verbs in recent role description")
+            concerns.append("senior title, no coding evidence in recent role")
         if features['pure_consulting']:
-            concerns.append("entire career in IT services firms")
+            concerns.append("entire career in IT services")
         if features['cv_without_nlp']:
-            concerns.append("CV/vision background without clear NLP or IR exposure")
+            concerns.append("CV/vision background, limited NLP/IR")
         if notice > 90:
-            concerns.append(f"long notice period ({notice}d)")
+            concerns.append(f"long notice ({notice}d)")
         if resp_rate < 0.2:
-            concerns.append(f"low recruiter response rate ({int(resp_rate*100)}%)")
+            concerns.append(f"low response rate ({int(resp_rate*100)}%)")
         if years < 5:
-            concerns.append(f"below JD experience floor ({years} yrs vs 5-9 target)")
+            concerns.append(f"under JD floor ({years} yrs)")
+        if years > 12:
+            concerns.append(f"over-experienced ({years} yrs)")
         if features['location_match'] < 0.9:
-            concerns.append(f"requires relocation from {location}")
+            concerns.append(f"needs relocation from {location}")
+        if icr < 0.4 and icr > 0:
+            concerns.append(f"low interview follow-through ({int(icr*100)}%)")
 
-        # ---- Format by rank tier ----
-        pos_str = '; '.join(positives[:2]) if positives else 'marginal technical signals'
-        con_str = '; '.join(concerns[:2]) if concerns else 'no major red flags'
+        if rank <= 10:   tone = "Strong fit"
+        elif rank <= 30: tone = "Good fit"
+        elif rank <= 60: tone = "Moderate fit"
+        else:            tone = "Weak fit"
 
-        if rank <= 10:
-            tone = "Strong fit"
-        elif rank <= 30:
-            tone = "Good fit"
-        elif rank <= 60:
-            tone = "Moderate fit"
+        # Build natural language reasoning like the spec examples
+        # "X years doing Y at Z; specific signal; honest concern."
+        parts = []
+
+        # Lead with most specific technical signal
+        if top_skills:
+            skill_str = ', '.join(
+                f"{s['name']} ({s.get('duration_months',0)}mo)"
+                for s in top_skills[:2]
+            )
+            parts.append(f"{years} yrs exp, deep in {skill_str}")
         else:
-            tone = "Weak fit"
+            parts.append(f"{years} yrs exp")
 
-        company_str = recent_company or company
-        reasoning = (
-            f"{title} at {company_str} | {years} yrs | {tone} — "
-            f"{pos_str}. "
-            f"Concerns: {con_str}."
-        )
+        # Add most distinctive positive
+        if features['production_builder'] > 0 and recent_desc:
+            parts.append(recent_desc.rstrip())
+        elif features['eval_frameworks'] > 0:
+            parts.append("rigorous evaluation background (NDCG/MRR/A-B)")
 
-        return reasoning[:300]
+        # Behavioral standout if notable
+        if notice <= 30:
+            parts.append(f"available in {notice}d")
+        elif resp_rate > 0.7:
+            parts.append(f"highly responsive ({int(resp_rate*100)}%)")
+        elif github > 60:
+            parts.append(f"active GitHub ({github})")
+
+        # One honest concern
+        if concerns:
+            parts.append(f"concern: {concerns[0]}")
+
+        reasoning = f"{title} at {recent_company} — " + "; ".join(parts) + "."
+        return reasoning[:350]

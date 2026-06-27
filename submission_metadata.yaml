@@ -7,61 +7,79 @@ team_name: "khikhi"
 primary_contact:
   name: "Ishika Gupta"
   email: "igputa2_be23@thapar.edu"
-  phone: "+91-6260915479"        # ← fill your number before submitting
+  phone: "+91-XXXXXXXXXX"        # ← fill your number before submitting
 
 team_members:
   - name: "Ishika Gupta"
     email: "igputa2_be23@thapar.edu"
     role: "Team Lead / ML Engineer"
-  - name: "Atharva Pandey"
-    email: "atharvapandey100@gmail.com"
-    role: "Data Engineer / Developer"
 
 # ============================================================================
 # Code and reproducibility
 # ============================================================================
 github_repo: "https://github.com/Miltonbottle/DataLoader"
 
-sandbox_link: "PASTE_COLAB_LINK_HERE" 
+sandbox_link: "PASTE_COLAB_LINK_HERE"
 # ← Replace with your Google Colab share link once created
+# See instructions: share → anyone with link → viewer
 
-reproduce_command: "python src/rank.py --candidates ./data/candidates.jsonl.gz --jd ./data/job_description.md --out ./outputs/submission.csv"
+reproduce_command: "python src/precompute_embeddings.py --candidates ./candidates.jsonl.gz --jd ./data/job_description.md --out_dir ./precomputed && python src/rank.py --candidates ./candidates.jsonl.gz --jd ./data/job_description.md --precomputed ./precomputed --out ./submission.csv"
 
 # ============================================================================
 # Compute environment
 # ============================================================================
 compute:
-  platform: "HP Laptop, Intel Core python i5-1135G7"
+  platform: "HP Laptop, Intel Core i5-1135G7"
   cpu_cores: 4
   ram_gb: 8
-  python_version: "3.13.5"
-  os: "Windows 11"
+  python_version: "3.11"                        # run `python --version` to confirm exact
+  os: "Windows 11"                              # update if Linux/other
   uses_gpu_for_inference: false
   has_network_during_ranking: false
-  pre_computation_required: false
-  pre_computation_time_minutes: 0
+  pre_computation_required: true
+  pre_computation_time_minutes: 20   # one-time offline; ranking itself runs in ~60s
 
 # ============================================================================
 # AI tools declaration
 # ============================================================================
 ai_tools_used:
   - "Claude"
-  - "Gemini"
 
 ai_usage_summary: |
-  Used Claude and Gemini as architectural sounding boards for O(1) pipeline optimization, code review, and edge-case bug detection (e.g., tie-breaker rounding, matrix multiplication batching). LLMs assisted in translating JD requirements into strict mathematical heuristic gates. All final engineering decisions, pipeline integration, and validation testing were conducted locally by the team. Zero candidate data was fed to any external LLM during the actual ranking execution.
+  Used Claude (Anthropic) extensively for architectural design, code review,
+  bug detection, and iterative refinement of the pipeline. Claude helped
+  identify scoring bugs (score saturation, location gate errors, missing JD
+  traps), suggested fixes, and reviewed all four source files against the
+  submission spec and job description. All engineering decisions, design
+  choices, and final code were authored and validated by the team. No
+  candidate data was fed to any external LLM.
 
 # ============================================================================
 # Approach summary
 # ============================================================================
 methodology_summary: |
-  Two-pass heuristic-semantic pipeline strictly optimized for the 5-minute CPU constraint. 
-  
-  Pass 1 (Retrieval): An O(1) text-blob heuristic funnel scans 100k candidates in ~15s. It applies absolute hard-gates (honeypots, ghost profiles, location mismatches) and mathematically penalizes JD traps (LangChain tourists, title chasers, hands-off architects, pure research). It directly boosts proven depth in evaluation frameworks (NDCG/MRR) and production ML shipping. 
-  
-  Pass 2 (Re-ranking): Takes the top 4,000 finalists and performs batched, vectorized semantic encoding (all-MiniLM-L6-v2) to compute cosine similarity against a curated JD embedding matrix. 
-  
-  The final score mathematically blends Semantic Alignment and Heuristic Tech Depth, scaled by a global Behavioral Multiplier built from 9 platform signals (response rates, interview completion, notice period, active applications). Total runtime is under 90 seconds on CPU. Uses deterministic f-strings for 0% hallucination, Stage 4-compliant reasoning generation.
+  Two-pass heuristic-semantic pipeline with precomputed embeddings.
+
+  Pass 1 (heuristic funnel, ~25s): Scans all 100K candidates using O(1)
+  string-blob matching. Applies hard disqualification gates (honeypots,
+  ghost profiles, location, experience floor) and six JD trap penalties
+  (LangChain tourist, pure research, title chaser, hands-off architect,
+  pure consulting, keyword stuffer, CV-without-NLP). Boosts candidates with
+  evaluation framework depth (NDCG/MRR/MAP), production shipping history,
+  and verified core skill depth across the full retrieval/ranking stack
+  (FAISS, Qdrant, Elasticsearch, sentence-transformers, LoRA, etc.).
+  Outputs top 3,000 finalists.
+
+  Pass 2 (semantic re-ranking, ~60s): Encodes all 3,000 finalists in a
+  single vectorised batch using all-MiniLM-L6-v2, computing cosine
+  similarity against a curated JD embedding. Final score is an additive
+  blend: semantic (45%) + heuristic base (45%) + behavioral bonus (10%).
+  Behavioral bonus incorporates 9 Redrob signals: response rate, notice
+  period, GitHub activity, open-to-work flag, interview completion rate,
+  avg response time, profile completeness, saved-by-recruiters count, and
+  offer acceptance rate.
+
+  Total runtime: ~180-230s on CPU, well within the 5-minute Stage 3 limit.
 
 # ============================================================================
 # Declarations

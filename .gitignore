@@ -1,7 +1,23 @@
-﻿data/candidates.jsonl
-data/*.jsonl
-data/*.docx
+﻿# Large data files — keep locally, never push
+candidates.jsonl
+candidates.jsonl.gz
+*.jsonl
+*.jsonl.gz
+
+# Submission output — submit via portal, not GitHub
+outputs/
+submission.csv
+
+# Python cache
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual env
 venv/
-.env
+.env/
+
+# OS
+.DS_Store
+Thumbs.db
